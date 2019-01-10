@@ -284,7 +284,9 @@ class SkyMeasurementTask(Task):
         statistic = afwMath.stringToStatisticsProperty(self.config.stats.statistic)
         imageSamples = []
         skySamples = []
-        for xStart, yStart, xStop, yStop in zip(xLimits[:-1], yLimits[:-1], xLimits[1:], yLimits[1:]):
+        for xIndex, yIndex in itertools.product(range(self.config.xNumSamples), range(self.config.yNumSamples)):
+            xStart, xStop = xLimits[xIndex : xIndex + 2]
+            yStart, yStop = yLimits[yIndex : yIndex + 2]
             box = afwGeom.Box2I(afwGeom.Point2I(xStart, yStart), afwGeom.Point2I(xStop, yStop))
             subImage = image.Factory(image, box)
             subSky = sky.Factory(sky, box)
