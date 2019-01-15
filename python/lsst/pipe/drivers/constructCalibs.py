@@ -29,8 +29,8 @@ from lsst.ctrl.pool.pool import Pool, NODE
 from lsst.pipe.drivers.background import SkyMeasurementTask, FocalPlaneBackground, FocalPlaneBackgroundConfig
 from lsst.pipe.drivers.visualizeVisit import makeCameraImage
 
-from .checksum import checksum
-from .utils import getDataRef
+from lsst.pipe.drivers.checksum import checksum
+from lsst.pipe.drivers.utils import getDataRef
 
 
 class CalibStatsConfig(Config):
@@ -1273,9 +1273,6 @@ class SkyTask(CalibTask):
         detector = exposure.getDetector()
         bbox = image.getBBox()
 
-        bgModel = backgrounds[visit]
-        bg = bgModel.toCcdBackground(detector, bbox)
-        image -= bg.getImage()
         image /= scales[visit]
 
         bg = self.sky.measureBackground(exposure.getMaskedImage())

@@ -12,10 +12,11 @@ from lsst.pipe.base import ArgumentParser, Struct
 from lsst.pex.config import Config, Field, ConfigurableField, ConfigField
 from lsst.ctrl.pool.pool import Pool
 from lsst.ctrl.pool.parallel import BatchPoolTask
-from lsst.pipe.drivers.background import SkyMeasurementTask, FocalPlaneBackground, FocalPlaneBackgroundConfig
+from lsst.pipe.drivers.background import FocalPlaneBackground, FocalPlaneBackgroundConfig
+from .background import SkyMeasurementTask
 import lsst.pipe.drivers.visualizeVisit as visualizeVisit
 
-DEBUG = False  # Debugging outputs?
+DEBUG = True  # Debugging outputs?
 
 
 def makeCameraImage(camera, exposures, filename=None, binning=8):
@@ -132,6 +133,16 @@ class SkyCorrectionTask(BatchPoolTask):
                 exposures = pool.mapToPrevious(self.collectMask, dataIdList)
                 makeCameraImage(camera, exposures, "mask" + extension)
 
+            if self.config.doSky:
+                measScales = pool.mapToPrevious(self.measureSkyFrame, dataIdList)
+                scale = self.sky.solveScales(measScales)
+                self.log.info("Sky frame scale: %s" % (scale,))
+                exposures = pool.mapToPrevious(self.subtractSkyFrame, dataIdList, scale)
+                if DEBUG:
+                    makeCameraImage(camera, exposures, "skysub" + extension)
+                    calibs = pool.mapToPrevious(self.collectSky, dataIdList)
+                    makeCameraImage(camera, calibs, "sky" + extension)
+
             if self.config.doBgModel:
                 bgModel = FocalPlaneBackground.fromCamera(self.config.bgModel, camera)
                 data = [Struct(dataId=dataId, bgModel=bgModel.clone()) for dataId in dataIdList]
@@ -148,16 +159,6 @@ class SkyCorrectionTask(BatchPoolTask):
                 exposures = pool.mapToPrevious(self.subtractModel, dataIdList, bgModel)
                 if DEBUG:
                     makeCameraImage(camera, exposures, "modelsub" + extension)
-
-            if self.config.doSky:
-                measScales = pool.mapToPrevious(self.measureSkyFrame, dataIdList)
-                scale = self.sky.solveScales(measScales)
-                self.log.info("Sky frame scale: %s" % (scale,))
-                exposures = pool.mapToPrevious(self.subtractSkyFrame, dataIdList, scale)
-                if DEBUG:
-                    makeCameraImage(camera, exposures, "skysub" + extension)
-                    calibs = pool.mapToPrevious(self.collectSky, dataIdList)
-                    makeCameraImage(camera, calibs, "sky" + extension)
 
             # Persist camera-level image of calexp
             image = makeCameraImage(camera, exposures)
