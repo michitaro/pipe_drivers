@@ -468,6 +468,9 @@ class FocalPlaneBackgroundConfig(Config):
             "NONE": "No background estimation is to be attempted",
         },
     )
+    doSmooth = Field(dtype=bool, default=False, doc="Do smoothing?")
+    smoothScale = Field(dtype=float, doc="Smoothing scale")
+    smoothWindowSize = Field(dtype=int, default=15, doc="Window size for smoothing")
     binning = Field(dtype=int, default=64, doc="Binning to use for CCD background model (pixels)")
 
 
@@ -721,6 +724,12 @@ class FocalPlaneBackground(object):
         values /= self._numbers
         thresh = self.config.minFrac*self.config.xSize*self.config.ySize
         isBad = self._numbers.getArray() < thresh
+        if self.config.doSmooth:
+            array = values.getArray()
+            array[isBad] = numpy.nan
+            gridSize = min(self.config.xSize, self.config.ySize)
+            array[:] = NanSafeSmoothing.gaussianSmoothing(array, self.config.smoothWindowSize, self.config.smoothScale / gridSize)
+            isBad = numpy.isnan(values.array)
         interpolateBadPixels(values.getArray(), isBad, self.config.interpolation)
         return values
 
@@ -785,3 +794,52 @@ class MaskObjectsTask(Task):
             detected = mask.array & mask.getPlaneBitMask(['DETECTED']) > 0
             exp.maskedImage.image.array[detected] = smooth.getImage().getArray()[detected]
 
+
+class NanSafeSmoothing:
+    '''
+        Smooth image dealing with NaN pixels
+    '''
+
+    @classmethod
+    def gaussianSmoothing(cls, array, windowSize, sigma):
+        return cls._safeConvolve2d(array, cls._gaussianKernel(windowSize, sigma))
+
+    @classmethod
+    def _gaussianKernel(cls, windowSize, sigma):
+        ''' Returns 2D gaussian kernel '''
+        s = sigma
+        r = windowSize
+        X, Y = numpy.meshgrid(
+            numpy.linspace(-r, r, 2 * r + 1),
+            numpy.linspace(-r, r, 2 * r + 1),
+        )
+        kernel = cls._normalDist(X, s) * cls._normalDist(Y, s)
+        # cut off
+        kernel[X**2 + Y**2 > (r + 0.5)**2] = 0.
+        return kernel / kernel.sum()
+
+    @staticmethod
+    def _normalDist(x, s=1., m=0.):
+        ''' Normal Distribution '''
+        return 1. / (s * numpy.sqrt(2. * numpy.pi)) * numpy.exp(-(x-m)**2/(2*s**2)) / (s * numpy.sqrt(2*numpy.pi))
+
+    @staticmethod
+    def _safeConvolve2d(image, kernel):
+        ''' Convolve 2D safely dealing with NaNs in `image` '''
+        assert numpy.ndim(image) == 2
+        assert numpy.ndim(kernel) == 2
+        assert kernel.shape[0] % 2 == 1 and kernel.shape[1] % 2 == 1
+        ks = kernel.shape
+        kl = (ks[0] - 1) // 2, \
+             (ks[1] - 1) // 2
+        image2 = numpy.pad(image, ((kl[0], kl[0]), (kl[1], kl[1])), 'constant', constant_values=numpy.nan)
+        convolved = numpy.empty_like(image)
+        convolved.fill(numpy.nan)
+        for yi in range(convolved.shape[0]):
+            for xi in range(convolved.shape[1]):
+                patch = image2[yi : yi + ks[0], xi : xi + ks[1]]
+                c = patch * kernel
+                ok = numpy.isfinite(c)
+                if numpy.any(ok):
+                    convolved[yi, xi] = numpy.nansum(c) / kernel[ok].sum()
+        return convolved
