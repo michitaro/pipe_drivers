@@ -41,6 +41,7 @@ def makeCameraImage(camera, exposures, filename=None, binning=8):
 class SkyCorrectionConfig(Config):
     """Configuration for SkyCorrectionTask"""
     bgModel = ConfigField(dtype=FocalPlaneBackgroundConfig, doc="Background model")
+    bgModel2 = ConfigField(dtype=FocalPlaneBackgroundConfig, doc="2nd Background model")
     sky = ConfigurableField(target=SkyMeasurementTask, doc="Sky measurement")
     maskObjects = ConfigurableField(target=MaskObjectsTask, doc="Mask Objects")
     doMaskObjects = Field(dtype=bool, default=True, doc="Mask objects to find good sky?")
@@ -51,6 +52,7 @@ class SkyCorrectionConfig(Config):
     def setDefaults(self):
         Config.setDefaults(self)
         self.maskObjects.doInterpolate = False
+        self.bgModel2.doSmooth = True
 
     def validate(self):
         assert not self.maskObjects.doInterpolate
@@ -99,7 +101,10 @@ class SkyCorrectionTask(BatchPoolTask):
         algorithms. We optionally apply:
 
         1. A large-scale background model.
+            This step removes very-large-scale sky such as moonlight.
         2. A sky frame.
+        3. A medium-scale background model.
+            This step removes residual sky (This is smooth on the focal plane).
 
         Only the master node executes this method. The data is held on
         the slave nodes, which do all the hard work.
@@ -156,11 +161,29 @@ class SkyCorrectionTask(BatchPoolTask):
                     calibs = pool.mapToPrevious(self.collectSky, dataIdList)
                     makeCameraImage(camera, calibs, "sky" + extension)
 
+            exposures = self.smoothFocalPlaneSubtraction(camera, pool, dataIdList)
+
             # Persist camera-level image of calexp
             image = makeCameraImage(camera, exposures)
             expRef.put(image, "calexp_camera")
 
             pool.mapToPrevious(self.write, dataIdList)
+
+    def smoothFocalPlaneSubtraction(self, camera, pool, dataIdList):
+        '''Do 2nd Focal Plane subtraction
+
+        After doSky, we get smooth focal plane image.
+        (Before doSky, sky pistons remain in HSC-G)
+        Now make smooth focal plane background and subtract it.
+        '''
+        bgModel = FocalPlaneBackground.fromCamera(self.config.bgModel2, camera)
+        data = [Struct(dataId=dataId, bgModel=bgModel.clone()) for dataId in dataIdList]
+        bgModelList = pool.mapToPrevious(self.accumulateModel, data)
+        for ii, bg in enumerate(bgModelList):
+            self.log.info("Background %d: %d pixels", ii, bg._numbers.array.sum())
+            bgModel.merge(bg)
+        exposures = pool.mapToPrevious(self.subtractModel, dataIdList, bgModel)
+        return exposures
 
     def loadImage(self, cache, dataId):
         """Load original image and restore the sky
