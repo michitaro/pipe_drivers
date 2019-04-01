@@ -7,8 +7,10 @@ import lsst.afw.math as afwMath
 import lsst.afw.image as afwImage
 import lsst.afw.geom as afwGeom
 import lsst.afw.cameraGeom as afwCameraGeom
+import lsst.meas.algorithms as measAlg
+import lsst.afw.table as afwTable
 
-from lsst.pex.config import Config, Field, ListField, ChoiceField, ConfigField, RangeField
+from lsst.pex.config import Config, Field, ListField, ChoiceField, ConfigField, RangeField, ConfigurableField
 from lsst.pipe.base import Task
 
 
@@ -722,4 +724,64 @@ class FocalPlaneBackground(object):
         interpolateBadPixels(values.getArray(), isBad, self.config.interpolation)
         return values
 
+
+class MaskObjectsConfig(Config):
+    """Configuration for MaskObjectsTask"""
+    nIter = Field(doc="Iteration for masking", dtype=int, default=3)
+    subtractBackground = ConfigurableField(target=measAlg.SubtractBackgroundTask, doc='Background configuration')
+    detection = ConfigurableField(target=measAlg.SourceDetectionTask, doc="Detection configuration")
+    detectSigma = Field(dtype=float, default=5., doc='Detection PSF gaussian sigmas')
+    doInterpolate = Field(dtype=bool, default=True, doc='Interpolate masked region?')
+    interpolate = ConfigurableField(target=measAlg.SubtractBackgroundTask, doc='Interpolate configuration')
+
+    def setDefaults(self):
+        self.detection.reEstimateBackground = False
+        self.detection.doTempLocalBackground = False
+        self.detection.doTempWideBackground = False
+        self.detection.thresholdValue = 2.5
+        # self.detection.thresholdPolarity = "both"
+        self.subtractBackground.binSize = 1024
+        self.subtractBackground.useApprox = False
+        self.interpolate.binSize = 256
+        self.interpolate.useApprox = False
+
+    def validate(self):
+        assert not self.detection.reEstimateBackground
+        assert not self.detection.doTempLocalBackground
+        assert not self.detection.doTempWideBackground
+
+        
+class MaskObjectsTask(Task):
+    """MaskObjectsTask
+
+    This task makes more exhaustive object mask by iteratively doing detection and background-subtraction.
+    The purpose of this task is to get true background removing faint tails of large objects.
+    This is useful to make clean SKY from relatively small number of visits.
+
+    We deliberately use the specified 'detectSigma' instead of the PSF,
+    in order to better pick up the faint wings of objects.
+    """
+    ConfigClass = MaskObjectsConfig
+
+    def __init__(self, *args, **kwargs):
+        super(MaskObjectsTask, self).__init__(*args, **kwargs)
+        # Disposable schema suppresses warning from SourceDetectionTask.__init__
+        self.makeSubtask("detection", schema=afwTable.Schema())
+        self.makeSubtask('interpolate')
+        self.makeSubtask('subtractBackground')
+
+    def run(self, exp):
+        for i in range(self.config.nIter):
+            self.log.info("Masking %d/%d", i + 1, self.config.nIter)
+            bg = self.subtractBackground.run(exp).background
+            fp = self.detection.detectFootprints(exp, sigma=self.config.detectSigma, clearMask=True)
+            exp.maskedImage += bg.getImage()
+
+        if self.config.doInterpolate:
+            self.log.info("Interpolating")
+            smooth = self.interpolate.run(exp).background
+            exp.maskedImage += smooth.getImage()
+            mask = exp.maskedImage.mask
+            detected = mask.array & mask.getPlaneBitMask(['DETECTED']) > 0
+            exp.maskedImage.image.array[detected] = smooth.getImage().getArray()[detected]
 
