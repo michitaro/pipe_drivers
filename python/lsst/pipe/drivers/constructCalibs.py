@@ -11,7 +11,7 @@ import numpy as np
 from builtins import zip
 from builtins import range
 
-from lsst.pex.config import Config, ConfigurableField, Field, ListField, ConfigField
+from lsst.pex.config import Config, ConfigurableField, Field, ListField, ConfigField, ConfigurableField
 from lsst.pipe.base import Task, Struct, TaskRunner, ArgumentParser
 import lsst.daf.base as dafBase
 import lsst.afw.math as afwMath
@@ -26,7 +26,7 @@ from lsst.afw.cameraGeom.utils import makeImageFromCamera
 
 from lsst.ctrl.pool.parallel import BatchPoolTask
 from lsst.ctrl.pool.pool import Pool, NODE
-from lsst.pipe.drivers.background import SkyMeasurementTask, FocalPlaneBackground, FocalPlaneBackgroundConfig
+from lsst.pipe.drivers.background import SkyMeasurementTask, FocalPlaneBackground, FocalPlaneBackgroundConfig, MaskObjectsTask
 from lsst.pipe.drivers.visualizeVisit import makeCameraImage
 
 from .checksum import checksum
@@ -1115,10 +1115,9 @@ class FringeTask(CalibTask):
 
 class SkyConfig(CalibConfig):
     """Configuration for sky frame construction"""
-    detection = ConfigurableField(target=measAlg.SourceDetectionTask, doc="Detection configuration")
     detectSigma = Field(dtype=float, default=2.0, doc="Detection PSF gaussian sigma")
-    subtractBackground = ConfigurableField(target=measAlg.SubtractBackgroundTask,
-                                           doc="Regular-scale background configuration, for object detection")
+    maskObjects = ConfigurableField(target=MaskObjectsTask,
+                                   doc="Configuration for masking objects aggressively")
     largeScaleBackground = ConfigField(dtype=FocalPlaneBackgroundConfig,
                                        doc="Large-scale background configuration")
     sky = ConfigurableField(target=SkyMeasurementTask, doc="Sky measurement")
@@ -1145,8 +1144,7 @@ class SkyTask(CalibTask):
 
     def __init__(self, *args, **kwargs):
         CalibTask.__init__(self, *args, **kwargs)
-        self.makeSubtask("detection")
-        self.makeSubtask("subtractBackground")
+        self.makeSubtask("maskObjects")
         self.makeSubtask("sky")
 
     def scatterProcess(self, pool, ccdIdLists):
@@ -1230,27 +1228,18 @@ class SkyTask(CalibTask):
             return dataRef.get("postISRCCD")
         exposure = CalibTask.processSingle(self, dataRef)
 
-        # Detect sources. Requires us to remove the background; we'll restore it later.
-        bgTemp = self.subtractBackground.run(exposure).background
-        footprints = self.detection.detectFootprints(exposure, sigma=self.config.detectSigma)
-        image = exposure.getMaskedImage()
-        if footprints.background is not None:
-            image += footprints.background.getImage()
-
-        # Mask high pixels
-        variance = image.getVariance()
-        noise = np.sqrt(np.median(variance.getArray()))
-        isHigh = image.getImage().getArray() > self.config.maskThresh*noise
-        image.getMask().getArray()[isHigh] |= image.getMask().getPlaneBitMask("DETECTED")
-
-        # Restore the background: it's what we want!
-        image += bgTemp.getImage()
+        self.maskObjects.run(exposure)
+        mi = exposure.maskedImage
 
         # Set detected/bad pixels to background to ensure they don't corrupt the background
-        maskVal = image.getMask().getPlaneBitMask(self.config.mask)
-        isBad = image.getMask().getArray() & maskVal > 0
-        bgLevel = np.median(image.getImage().getArray()[~isBad])
-        image.getImage().getArray()[isBad] = bgLevel
+        if self.config.maskObjects.doInterpolate:
+            mi.mask.array &= ~mi.mask.getPlaneBitMask(['DETECTED'])
+        else:
+            maskVal = mi.mask.getPlaneBitMask(self.config.mask)
+            isBad = mi.mask.array & maskVal > 0
+            bgLevel = np.median(mi.image.array[~isBad])
+            mi.image.array[isBad] = bgLevel
+
         dataRef.put(exposure, "postISRCCD")
         return exposure
 
